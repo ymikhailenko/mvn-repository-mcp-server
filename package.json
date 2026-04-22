@@ -1,6 +1,6 @@
 {
   "name": "mvn-repository-mcp-server",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "A MCP server that offers functionality to search mvnrepository.com",
   "main": "dist/index.js",
   "type": "module",
@@ -34,6 +34,7 @@
     "dev:stdio": "npm run build && npm run start:stdio",
     "dev:sse": "npm run build && npm run start:sse",
     "clean": "rimraf dist",
+    "postbuild": "chmod +x dist/index.js",
     "prepublishOnly": "npm run clean && npm run build",
     "test": "vitest run"
   },
