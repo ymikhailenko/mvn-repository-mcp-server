@@ -1,6 +1,7 @@
-import { MavenArtifact, SearchResult, ArtifactVersions, ArtifactVersion, DependencySnippet } from './types.js';
+import { MavenArtifact, SearchResult, ArtifactVersions, DependencySnippet } from './types.js';
 import axios, { AxiosInstance } from 'axios';
 import * as cheerio from 'cheerio';
+import { parseArtifactVersionsHtml } from './versionParser.js';
 
 export class MavenRepositorySearcher {
     private readonly baseUrl = 'https://mvnrepository.com';
@@ -42,19 +43,19 @@ export class MavenRepositorySearcher {
         const timeSinceLastRequest = now - this.lastRequestTime;
         const minDelay = 3000; // Minimum 3 seconds between requests
         const randomDelay = Math.random() * 2000; // up to 2 seconds random delay
-        
+
         if (timeSinceLastRequest < minDelay) {
             await this.delay(minDelay - timeSinceLastRequest + randomDelay);
         } else {
             await this.delay(randomDelay);
         }
-        
+
         this.lastRequestTime = Date.now();
     }
 
     private async makeRequest(url: string, retryCount: number = 0): Promise<string> {
         const maxRetries = 3;
-        
+
         try {
             await this.intelligentDelay();
 
@@ -66,22 +67,22 @@ export class MavenRepositorySearcher {
 
             const response = await this.axiosInstance.get(url, { headers });
             return response.data;
-            
+
         } catch (error: any) {
             if (error.response?.status === 403 && retryCount < maxRetries) {
                 console.log(`Got 403, retrying in ${(retryCount + 1) * 5} seconds... (attempt ${retryCount + 1}/${maxRetries})`);
-                
+
                 // Exponential backoff with jitter
                 const backoffTime = retryCount * 5000 + Math.random() * 3000;
                 await this.delay(backoffTime);
-                
+
                 return this.makeRequest(url, retryCount + 1);
             }
-            
+
             if (error.response?.status === 403) {
                 throw new Error(`Access denied after ${maxRetries} retries. The site may have temporarily blocked this IP address.`);
             }
-            
+
             throw error;
         }
     }
@@ -153,39 +154,7 @@ export class MavenRepositorySearcher {
         console.log(`Fetching versions for: ${artifactUrl}`);
 
         const responseData = await this.makeRequest(artifactUrl);
-        const $ = cheerio.load(responseData);
-        const versions: ArtifactVersion[] = [];
-
-        // Look for version table
-        $('.grid.versions tbody tr').each((index, element) => {
-            const $element = $(element);
-            const $versionLink = $element.find('td:first-child a');
-            const $dateCell = $element.find('td:nth-child(2)');
-            const $vulnCell = $element.find('td:nth-child(3)');
-
-            if ($versionLink.length > 0) {
-                const version = $versionLink.text().trim();
-                const href = $versionLink.attr('href');
-                const releaseDate = $dateCell.text().trim() || undefined;
-
-                // Parse vulnerability count
-                let vulnerabilities = 0;
-                const vulnText = $vulnCell.text().trim();
-                if (vulnText && vulnText !== '-') {
-                    const vulnMatch = vulnText.match(/(\d+)/);
-                    if (vulnMatch) {
-                        vulnerabilities = parseInt(vulnMatch[1]);
-                    }
-                }
-
-                versions.push({
-                    version,
-                    releaseDate,
-                    vulnerabilities: vulnerabilities > 0 ? vulnerabilities : undefined,
-                    url: href ? `${this.baseUrl}${href}` : undefined
-                });
-            }
-        });
+        const versions = parseArtifactVersionsHtml(responseData, groupId, artifactId, this.baseUrl);
 
         return {
             groupId,
@@ -258,20 +227,5 @@ export class MavenRepositorySearcher {
             gradle,
             sbt
         };
-    }
-
-    async getArtifactDetails(groupId: string, artifactId: string): Promise<MavenArtifact | null> {
-        const versions = await this.getArtifactVersions(groupId, artifactId);
-        if (versions.versions.length > 0) {
-            const latestVersion = versions.versions[0]; // Assuming first is latest
-            return {
-                groupId,
-                artifactId,
-                version: latestVersion.version,
-                url: latestVersion.url,
-                lastUpdated: latestVersion.releaseDate
-            };
-        }
-        return null;
     }
 }
