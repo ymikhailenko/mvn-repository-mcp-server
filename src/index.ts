@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { MavenRepositorySearcher } from "./searcher.js";
 import { SearchResult, ArtifactVersions, DependencySnippet } from "./types.js";
 import { Command } from "commander";
 import http from "node:http";
 import { IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import packageJson from "../package.json" with { type: "json" };
 
 class MavenRepositoryServer {
     private server: McpServer;
@@ -16,17 +18,21 @@ class MavenRepositoryServer {
 
     constructor() {
         this.searcher = new MavenRepositorySearcher();
-        this.server = new McpServer({
-            name: "mvn-repository-mcp-server",
-            version: "0.0.1",
-        });
-
-        this.setupToolHandlers();
+        this.server = this.createMcpServer();
         this.setupErrorHandling();
     }
 
-    private setupToolHandlers(): void {
-        this.server.registerTool(
+    private createMcpServer(): McpServer {
+        const mcpServer = new McpServer({
+            name: "mvn-repository-mcp-server",
+            version: packageJson.version,
+        });
+        this.registerTools(mcpServer);
+        return mcpServer;
+    }
+
+    private registerTools(mcpServer: McpServer): void {
+        mcpServer.registerTool(
             "search_maven_artifacts",
             {
                 description: "Search for Maven artifacts on mvnrepository.com",
@@ -40,7 +46,7 @@ class MavenRepositoryServer {
             }
         );
 
-        this.server.registerTool(
+        mcpServer.registerTool(
             "get_artifact_versions",
             {
                 description: "Get all available versions of a Maven artifact",
@@ -54,7 +60,7 @@ class MavenRepositoryServer {
             }
         );
 
-        this.server.registerTool(
+        mcpServer.registerTool(
             "get_pom_xml",
             {
                 description: "Fetch the pom.xml file for a specific artifact version",
@@ -69,7 +75,7 @@ class MavenRepositoryServer {
             }
         );
 
-        this.server.registerTool(
+        mcpServer.registerTool(
             "get_dependency_snippets",
             {
                 description: "Get Maven, Gradle, and other build tool dependency snippets for an artifact",
@@ -226,39 +232,65 @@ class MavenRepositoryServer {
         console.error("Maven Repository MCP server running on stdio");
     }
 
-    async runSSE(port: number): Promise<void> {
-        const server = http.createServer();
-        const transports = new Map<string, SSEServerTransport>();
+    async runHttp(port: number): Promise<void> {
+        const transports = new Map<string, StreamableHTTPServerTransport>();
 
-        server.on("request", async (req: IncomingMessage, res: ServerResponse) => {
+        const httpServer = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
             const url = new URL(req.url!, `http://${req.headers.host}`);
-            if (req.method === "GET" && url.pathname === "/sse") {
-                console.error("New SSE connection");
-                const transport = new SSEServerTransport("/message", res);
-                await this.server.connect(transport);
-                transports.set(transport.sessionId, transport);
 
-                transport.onclose = () => {
-                    console.error("SSE connection closed");
-                    transports.delete(transport.sessionId);
-                };
-            } else if (req.method === "POST" && url.pathname === "/message") {
-                const sessionId = url.searchParams.get("sessionId");
-                if (sessionId && transports.has(sessionId)) {
-                    const transport = transports.get(sessionId)!;
-                    await transport.handlePostMessage(req, res);
-                } else {
-                    res.writeHead(404);
-                    res.end("Session not found");
-                }
-            } else {
+            if (url.pathname !== "/mcp") {
                 res.writeHead(404);
                 res.end("Not found");
+                return;
             }
+
+            const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+            if (req.method === "DELETE") {
+                if (sessionId && transports.has(sessionId)) {
+                    await transports.get(sessionId)!.close();
+                    transports.delete(sessionId);
+                }
+                res.writeHead(200);
+                res.end();
+                return;
+            }
+
+            if (req.method !== "POST" && req.method !== "GET") {
+                res.writeHead(405);
+                res.end("Method not allowed");
+                return;
+            }
+
+            let transport: StreamableHTTPServerTransport;
+
+            if (!sessionId) {
+                transport = new StreamableHTTPServerTransport({
+                    sessionIdGenerator: () => randomUUID(),
+                    onsessioninitialized: (id) => {
+                        transports.set(id, transport);
+                    },
+                    onsessionclosed: (id) => {
+                        transports.delete(id);
+                    },
+                });
+                const sessionServer = this.createMcpServer();
+                await sessionServer.connect(transport);
+            } else {
+                const existing = transports.get(sessionId);
+                if (!existing) {
+                    res.writeHead(404);
+                    res.end("Session not found");
+                    return;
+                }
+                transport = existing;
+            }
+
+            await transport.handleRequest(req, res);
         });
 
-        server.listen(port, () => {
-            console.error(`Maven Repository MCP server running on SSE at http://localhost:${port}/sse`);
+        httpServer.listen(port, () => {
+            console.error(`Maven Repository MCP server running on Streamable HTTP at http://localhost:${port}/mcp`);
         });
     }
 }
@@ -268,7 +300,7 @@ const program = new Command();
 program
     .name("mvn-repository-mcp-server")
     .description("Maven Repository MCP Server - Search mvnrepository.com artifacts")
-    .version("0.0.1");
+    .version(packageJson.version);
 
 program
     .command("stdio")
@@ -280,8 +312,8 @@ program
     });
 
 program
-    .command("sse")
-    .description("Run server using SSE transport")
+    .command("http")
+    .description("Run server using Streamable HTTP transport")
     .option("-p, --port <port>", "Port to listen on", "3000")
     .action(async (options) => {
         const port = parseInt(options.port);
@@ -290,9 +322,9 @@ program
             process.exit(1);
         }
 
-        console.error(`Starting Maven Repository MCP server with SSE transport on port ${port}...`);
+        console.error(`Starting Maven Repository MCP server with Streamable HTTP transport on port ${port}...`);
         const server = new MavenRepositoryServer();
-        await server.runSSE(port);
+        await server.runHttp(port);
     });
 
 // Default to stdio if no command is provided
