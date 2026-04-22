@@ -2,179 +2,89 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { MavenRepositorySearcher } from "./searcher.js";
 import { SearchResult, ArtifactVersions, DependencySnippet } from "./types.js";
 import { Command } from "commander";
 import http from "node:http";
 import { IncomingMessage, ServerResponse } from "node:http";
+import { z } from "zod";
 
 class MavenRepositoryServer {
-    private server: Server;
+    private server: McpServer;
     private searcher: MavenRepositorySearcher;
 
     constructor() {
         this.searcher = new MavenRepositorySearcher();
-        this.server = new Server(
-            {
-                name: "mvn-repository-mcp-server",
-                version: "0.0.1",
-            },
-            {
-                capabilities: {
-                    tools: {},
-                },
-            }
-        );
+        this.server = new McpServer({
+            name: "mvn-repository-mcp-server",
+            version: "0.0.1",
+        });
 
         this.setupToolHandlers();
         this.setupErrorHandling();
     }
 
     private setupToolHandlers(): void {
-        this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-            return {
-                tools: [
-                    {
-                        name: "search_maven_artifacts",
-                        description: "Search for Maven artifacts on mvnrepository.com",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                query: {
-                                    type: "string",
-                                    description: "Search query for Maven artifacts",
-                                },
-                                maxResults: {
-                                    type: "number",
-                                    description: "Maximum number of results to return (default: 10)",
-                                    default: 10,
-                                },
-                            },
-                            required: ["query"],
-                        },
-                    },
-                    {
-                        name: "get_artifact_versions",
-                        description: "Get all available versions of a Maven artifact",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                groupId: {
-                                    type: "string",
-                                    description: "The group ID of the artifact (e.g., 'org.springframework')",
-                                },
-                                artifactId: {
-                                    type: "string",
-                                    description: "The artifact ID (e.g., 'spring-core')",
-                                },
-                            },
-                            required: ["groupId", "artifactId"],
-                        },
-                    },
-                    {
-                        name: "get_pom_xml",
-                        description: "Fetch the pom.xml file for a specific artifact version",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                groupId: {
-                                    type: "string",
-                                    description: "The group ID of the artifact",
-                                },
-                                artifactId: {
-                                    type: "string",
-                                    description: "The artifact ID",
-                                },
-                                version: {
-                                    type: "string",
-                                    description: "The version of the artifact",
-                                },
-                            },
-                            required: ["groupId", "artifactId", "version"],
-                        },
-                    },
-                    {
-                        name: "get_dependency_snippets",
-                        description: "Get Maven, Gradle, and other build tool dependency snippets for an artifact",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                groupId: {
-                                    type: "string",
-                                    description: "The group ID of the artifact",
-                                },
-                                artifactId: {
-                                    type: "string",
-                                    description: "The artifact ID",
-                                },
-                                version: {
-                                    type: "string",
-                                    description: "The version of the artifact",
-                                },
-                            },
-                            required: ["groupId", "artifactId", "version"],
-                        },
-                    },
-                ],
-            };
-        }); 
-        
-        this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-            const { name, arguments: args } = request.params;
-
-            if (!args || typeof args !== 'object') {
-                throw new Error("Invalid arguments provided");
+        this.server.registerTool(
+            "search_maven_artifacts",
+            {
+                description: "Search for Maven artifacts on mvnrepository.com",
+                inputSchema: z.object({
+                    query: z.string().describe("Search query for Maven artifacts"),
+                    maxResults: z.number().optional().default(10).describe("Maximum number of results to return (default: 10)"),
+                }),
+            },
+            async ({ query, maxResults }) => {
+                return await this.searchMavenArtifacts(query, maxResults ?? 10);
             }
+        );
 
-            switch (name) {
-                case "search_maven_artifacts":
-                    const query = args.query;
-                    const maxResults = args.maxResults;
-
-                    if (typeof query !== 'string') {
-                        throw new Error("Query must be a string");
-                    }
-
-                    return await this.searchMavenArtifacts(
-                        query,
-                        typeof maxResults === 'number' ? maxResults : 10
-                    );
-
-                case "get_artifact_versions":
-                    const { groupId: vGroupId, artifactId: vArtifactId } = args;
-
-                    if (typeof vGroupId !== 'string' || typeof vArtifactId !== 'string') {
-                        throw new Error("groupId and artifactId must be strings");
-                    }
-
-                    return await this.getArtifactVersions(vGroupId, vArtifactId);
-
-                case "get_pom_xml":
-                    const { groupId: pGroupId, artifactId: pArtifactId, version: pVersion } = args;
-
-                    if (typeof pGroupId !== 'string' || typeof pArtifactId !== 'string' || typeof pVersion !== 'string') {
-                        throw new Error("groupId, artifactId, and version must be strings");
-                    }
-
-                    return await this.getPomXml(pGroupId, pArtifactId, pVersion);
-
-                case "get_dependency_snippets":
-                    const { groupId: sGroupId, artifactId: sArtifactId, version: sVersion } = args;
-
-                    if (typeof sGroupId !== 'string' || typeof sArtifactId !== 'string' || typeof sVersion !== 'string') {
-                        throw new Error("groupId, artifactId, and version must be strings");
-                    }
-
-                    return await this.getDependencySnippets(sGroupId, sArtifactId, sVersion);
-
-                default:
-                    throw new Error(`Unknown tool: ${name}`);
+        this.server.registerTool(
+            "get_artifact_versions",
+            {
+                description: "Get all available versions of a Maven artifact",
+                inputSchema: z.object({
+                    groupId: z.string().describe("The group ID of the artifact (e.g., 'org.springframework')"),
+                    artifactId: z.string().describe("The artifact ID (e.g., 'spring-core')"),
+                }),
+            },
+            async ({ groupId, artifactId }) => {
+                return await this.getArtifactVersions(groupId, artifactId);
             }
-        });
-    } 
-    
+        );
+
+        this.server.registerTool(
+            "get_pom_xml",
+            {
+                description: "Fetch the pom.xml file for a specific artifact version",
+                inputSchema: z.object({
+                    groupId: z.string().describe("The group ID of the artifact"),
+                    artifactId: z.string().describe("The artifact ID"),
+                    version: z.string().describe("The version of the artifact"),
+                }),
+            },
+            async ({ groupId, artifactId, version }) => {
+                return await this.getPomXml(groupId, artifactId, version);
+            }
+        );
+
+        this.server.registerTool(
+            "get_dependency_snippets",
+            {
+                description: "Get Maven, Gradle, and other build tool dependency snippets for an artifact",
+                inputSchema: z.object({
+                    groupId: z.string().describe("The group ID of the artifact"),
+                    artifactId: z.string().describe("The artifact ID"),
+                    version: z.string().describe("The version of the artifact"),
+                }),
+            },
+            async ({ groupId, artifactId, version }) => {
+                return await this.getDependencySnippets(groupId, artifactId, version);
+            }
+        );
+    }
+
     private async searchMavenArtifacts(query: string, maxResults: number): Promise<any> {
         try {
             const result: SearchResult = await this.searcher.searchArtifacts(query, maxResults);
@@ -300,7 +210,7 @@ class MavenRepositoryServer {
     }
 
     private setupErrorHandling(): void {
-        this.server.onerror = (error) => {
+        this.server.server.onerror = (error) => {
             console.error("[MCP Error]", error);
         };
 
