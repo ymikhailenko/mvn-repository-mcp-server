@@ -163,18 +163,24 @@ Generate dependency declarations for Maven, Gradle, and SBT.
 - **`npm run start:http`** - Use Streamable HTTP transport (port 3000)
 - **`npm run dev:stdio`** - Build and run with stdio
 - **`npm run clean`** - Remove compiled files
+- **`npm test`** - Run unit tests
 
 ### Project Structure
 
 ```
 mvn-repository-mcp-server/
 ├── src/
-│   ├── index.ts      # Main server entry point & CLI
-│   ├── types.ts      # TypeScript interfaces
-│   └── searcher.ts   # Core search & retrieval logic
+│   ├── index.ts            # Main server entry point & CLI
+│   ├── types.ts            # TypeScript interfaces
+│   ├── searcher.ts         # Core search & retrieval logic
+│   ├── versionParser.ts    # HTML parsing for artifact versions
+│   └── __tests__/
+│       ├── fixtures/       # Static HTML fixtures for unit tests
+│       └── versionParser.test.ts
 ├── dist/             # Compiled JavaScript output
 ├── package.json      # Project configuration
 ├── tsconfig.json     # TypeScript configuration
+├── vitest.config.ts  # Test configuration
 └── README.md         # This file
 ```
 
